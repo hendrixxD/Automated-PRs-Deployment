@@ -15,7 +15,7 @@ jobs:
     if: github.event.action != 'closed'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Setup SSH
         run: |
@@ -49,7 +49,7 @@ jobs:
           EOF
 
       - name: Comment on PR
-        uses: actions/github-script@v6
+        uses: actions/github-script@v4
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
