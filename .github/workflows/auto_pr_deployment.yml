@@ -6,40 +6,55 @@ on:
 
 env:
   EC2_HOST: ${{ secrets.EC2_HOST }}
-  EC2_USERNAME: PRs_Automation
+  EC2_USERNAME: ec2-user
   SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
 
 jobs:
-  deploy:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.set-vars.outputs.pr_number }}
+      backend_port: ${{ steps.set-vars.outputs.backend_port }}
+      frontend_port: ${{ steps.set-vars.outputs.frontend_port }}
+    steps:
+      - name: Set variables
+        id: set-vars
+        run: |
+          echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          echo "backend_port=$((8000 + ${{ github.event.pull_request.number }}))" >> $GITHUB_OUTPUT
+          echo "frontend_port=$((5173 + ${{ github.event.pull_request.number }}))" >> $GITHUB_OUTPUT
+
+  deploy_or_update:
+    needs: setup
     runs-on: ubuntu-latest
     if: github.event.action != 'closed'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@v2
+      
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/ec2.key
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/ec2.key
           chmod 600 ~/.ssh/ec2.key
-          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ env.EC2_HOST }} >> ~/.ssh/known_hosts
 
       - name: Deploy or Update Container
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.setup.outputs.pr_number }}
           GITHUB_SHA: ${{ github.sha }}
-          BACKEND_PORT: ${{ 8000 + github.event.pull_request.number }}
-          FRONTEND_PORT: ${{ 5173 + github.event.pull_request.number }}
+          BACKEND_PORT: ${{ needs.setup.outputs.backend_port }}
+          FRONTEND_PORT: ${{ needs.setup.outputs.frontend_port }}
         run: |
-          scp -i ~/.ssh/ec2.key -r ./* ${EC2_USERNAME}@${EC2_HOST}:~/pr-${PR_NUMBER}
-          ssh -i ~/.ssh/ec2.key ${EC2_USERNAME}@${EC2_HOST} << EOF
+          scp -i ~/.ssh/ec2.key -r ./* ${{ env.EC2_USERNAME }}@${{ env.EC2_HOST }}:~/pr-${PR_NUMBER}
+          ssh -i ~/.ssh/ec2.key ${{ env.EC2_USERNAME }}@${{ env.EC2_HOST }} << EOF
             set -e
             cd ~/pr-${PR_NUMBER}
             echo "PR_NUMBER=${PR_NUMBER}" > .env
             echo "GITHUB_SHA=${GITHUB_SHA}" >> .env
             echo "BACKEND_PORT=${BACKEND_PORT}" >> .env
             echo "FRONTEND_PORT=${FRONTEND_PORT}" >> .env
-            echo "EC2_HOST=${EC2_HOST}" >> .env
+            echo "EC2_HOST=${{ env.EC2_HOST }}" >> .env
             
             docker-compose down
             docker-compose build --no-cache
@@ -48,27 +63,6 @@ jobs:
             docker image prune -af
           EOF
 
-      - name: Comment on PR
-        uses: actions/github-script@v4
-        with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
-          script: |
-            const prNumber = '${{ github.event.pull_request.number }}';
-            const backendPort = 8000 + parseInt(prNumber);
-            const frontendPort = 5173 + parseInt(prNumber);
-            const backendUrl = `http://${process.env.EC2_HOST}:${backendPort}`;
-            const frontendUrl = `http://${process.env.EC2_HOST}:${frontendPort}`;
-            const body = `Deployment for PR #${prNumber} is live!
-            Backend URL: ${backendUrl}
-            Frontend URL: ${frontendUrl}
-            Commit: ${{ github.sha }}`;
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            })
-
   cleanup:
     runs-on: ubuntu-latest
     if: github.event.action == 'closed'
@@ -76,15 +70,15 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/ec2.key
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/ec2.key
           chmod 600 ~/.ssh/ec2.key
-          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ env.EC2_HOST }} >> ~/.ssh/known_hosts
 
       - name: Cleanup Container and Resources
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          ssh -i ~/.ssh/ec2.key ${EC2_USERNAME}@${EC2_HOST} << EOF
+          ssh -i ~/.ssh/ec2.key ${{ env.EC2_USERNAME }}@${{ env.EC2_HOST }} << EOF
             cd ~/pr-${PR_NUMBER}
             docker-compose down -v --rmi all
             cd ~
@@ -93,22 +87,26 @@ jobs:
             docker volume rm pr${PR_NUMBER}_postgres_data || true
             docker system prune -af --volumes
           EOF
-        continue-on-error: true
-        id: deploy
-        
-      - name: Check Deployment Status
-        if: steps.deploy.outcome == 'failure'
-        run: |
-          echo "Deployment failed. Check the logs for more information."
-          exit 1  
 
+  comment_pr:
+    needs: [setup, deploy_or_update]
+    runs-on: ubuntu-latest
+    if: github.event.action != 'closed'
+    steps:
       - name: Comment on PR
         uses: actions/github-script@v6
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
-            const prNumber = '${{ github.event.pull_request.number }}';
-            const body = `PR #${prNumber} environment has been cleaned up. All associated containers, images, volumes, and networks have been removed.`;
+            const prNumber = '${{ needs.setup.outputs.pr_number }}';
+            const backendPort = '${{ needs.setup.outputs.backend_port }}';
+            const frontendPort = '${{ needs.setup.outputs.frontend_port }}';
+            const backendUrl = `http://${process.env.EC2_HOST}:${backendPort}`;
+            const frontendUrl = `http://${process.env.EC2_HOST}:${frontendPort}`;
+            const body = `Deployment for PR #${prNumber} is live!
+            Backend URL: ${backendUrl}
+            Frontend URL: ${frontendUrl}
+            Commit: ${{ github.sha }}`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
