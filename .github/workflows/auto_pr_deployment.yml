@@ -1,13 +1,13 @@
-name: PR Deployment to EC2
+name: PR Deployment to Localhost
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
 
 env:
-  EC2_HOST: ${{ secrets.EC2_HOST }}
-  EC2_USERNAME: ec2-user
-  SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+  LOCAL_HOST: 127.0.0.1
+  LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
+  SSH_PRIVATE_KEY: ${{ secrets.LOCAL_SSH_PRIVATE_KEY }}
 
 jobs:
   setup:
@@ -35,9 +35,9 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/ec2.key
-          chmod 600 ~/.ssh/ec2.key
-          ssh-keyscan -H ${{ env.EC2_HOST }} >> ~/.ssh/known_hosts
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/localhost.key
+          chmod 600 ~/.ssh/localhost.key
+          ssh-keyscan -H ${{ env.LOCAL_HOST }} >> ~/.ssh/known_hosts
 
       - name: Deploy or Update Container
         env:
@@ -46,15 +46,15 @@ jobs:
           BACKEND_PORT: ${{ needs.setup.outputs.backend_port }}
           FRONTEND_PORT: ${{ needs.setup.outputs.frontend_port }}
         run: |
-          scp -i ~/.ssh/ec2.key -r ./* ${{ env.EC2_USERNAME }}@${{ env.EC2_HOST }}:~/pr-${PR_NUMBER}
-          ssh -i ~/.ssh/ec2.key ${{ env.EC2_USERNAME }}@${{ env.EC2_HOST }} << EOF
+          scp -i ~/.ssh/localhost.key -r ./* ${{ env.LOCAL_USERNAME }}@${{ env.LOCAL_HOST }}:~/pr-${PR_NUMBER}
+          ssh -i ~/.ssh/localhost.key ${{ env.LOCAL_USERNAME }}@${{ env.LOCAL_HOST }} << EOF
             set -e
             cd ~/pr-${PR_NUMBER}
             echo "PR_NUMBER=${PR_NUMBER}" > .env
             echo "GITHUB_SHA=${GITHUB_SHA}" >> .env
             echo "BACKEND_PORT=${BACKEND_PORT}" >> .env
             echo "FRONTEND_PORT=${FRONTEND_PORT}" >> .env
-            echo "EC2_HOST=${{ env.EC2_HOST }}" >> .env
+            echo "LOCAL_HOST=${{ env.LOCAL_HOST }}" >> .env
             
             docker-compose down
             docker-compose build --no-cache
@@ -70,15 +70,15 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/ec2.key
-          chmod 600 ~/.ssh/ec2.key
-          ssh-keyscan -H ${{ env.EC2_HOST }} >> ~/.ssh/known_hosts
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/localhost.key
+          chmod 600 ~/.ssh/localhost.key
+          ssh-keyscan -H ${{ env.LOCAL_HOST }} >> ~/.ssh/known_hosts
 
       - name: Cleanup Container and Resources
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          ssh -i ~/.ssh/ec2.key ${{ env.EC2_USERNAME }}@${{ env.EC2_HOST }} << EOF
+          ssh -i ~/.ssh/localhost.key ${{ env.LOCAL_USERNAME }}@${{ env.LOCAL_HOST }} << EOF
             cd ~/pr-${PR_NUMBER}
             docker-compose down -v --rmi all
             cd ~
@@ -101,12 +101,30 @@ jobs:
             const prNumber = '${{ needs.setup.outputs.pr_number }}';
             const backendPort = '${{ needs.setup.outputs.backend_port }}';
             const frontendPort = '${{ needs.setup.outputs.frontend_port }}';
-            const backendUrl = `http://${process.env.EC2_HOST}:${backendPort}`;
-            const frontendUrl = `http://${process.env.EC2_HOST}:${frontendPort}`;
+            const backendUrl = `http://${process.env.LOCAL_HOST}:${backendPort}`;
+            const frontendUrl = `http://${process.env.LOCAL_HOST}:${frontendPort}`;
             const body = `Deployment for PR #${prNumber} is live!
             Backend URL: ${backendUrl}
             Frontend URL: ${frontendUrl}
             Commit: ${{ github.sha }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            })
+
+  comment_cleanup:
+    runs-on: ubuntu-latest
+    if: github.event.action == 'closed'
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const prNumber = '${{ github.event.pull_request.number }}';
+            const body = `PR #${prNumber} environment has been cleaned up. All associated containers, images, volumes, and networks have been removed.`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
